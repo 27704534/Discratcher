@@ -153,3 +153,13 @@ Thanks to the authors of these projects, and to everyone who reported measuremen
 Copyright (C) 2026 Yigu Wang
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) and [NOTICE](NOTICE). SPDX: `GPL-3.0-or-later`.
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=popcornboom%2Fdiscratcher&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&legend=top-left" />
+ </picture>
+</a>
