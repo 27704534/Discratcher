@@ -153,3 +153,13 @@ Discratcher 的目标是让 DVD-R 刻图的标定更简单，并在 macOS、Wind
 Copyright (C) 2026 Yigu Wang
 
 本程序是自由软件：你可以按照自由软件基金会发布的 GNU 通用公共许可证（第 3 版，或任何更新的版本）重新发布和修改它。发布本程序是希望它有用，但不提供任何担保，包括适销性或特定用途适用性的隐含担保。详见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。SPDX：`GPL-3.0-or-later`。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=popcornboom%2Fdiscratcher&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=popcornboom/discratcher&type=date&legend=top-left" />
+ </picture>
+</a>
