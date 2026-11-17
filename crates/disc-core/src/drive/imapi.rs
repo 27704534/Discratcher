@@ -241,9 +241,13 @@ impl Object {
             ((*d.vtbl).invoke)(self.0, id, &IID_NULL, 0x0409, flags, &mut params, &mut result, fault_ptr, null_mut())
         };
         let raised = unsafe { Fault::take(&mut fault) };
-        if hr < 0 {
-            // IMAPI raises its errors as exceptions: the HRESULT is then only
-            // DISP_E_EXCEPTION, and the real code and text are in the EXCEPINFO.
+        // IMAPI raises its errors as exceptions: the HRESULT is then only
+        // DISP_E_EXCEPTION, and the real code and text are in the EXCEPINFO.
+        let code = match raised.as_ref() {
+            Some(f) if hr == DISP_E_EXCEPTION => f.code,
+            _ => hr,
+        };
+        if hr < 0 && !adjusted(code) {
             return Err(match raised {
                 Some(f) if hr == DISP_E_EXCEPTION => f.text(),
                 _ => describe(hr, ""),
@@ -321,6 +325,58 @@ impl Drop for Object {
 const IID_NULL: Guid = guid(0, 0, 0, [0; 8]);
 const DISP_E_EXCEPTION: HResult = 0x8002_0009u32 as i32;
 
+/// A drive that had to change the request says so with a success code, not an
+/// error: S_IMAPI_SPEEDADJUSTED, S_IMAPI_ROTATIONADJUSTED and S_IMAPI_BOTHADJUSTED
+/// mean the drive took the speed or the rotation type it wanted and carried on.
+/// IMAPI raises those the way it raises its errors, so the code has to be read
+/// out of the EXCEPINFO, not from the HRESULT the call itself returns.
+fn adjusted(code: HResult) -> bool {
+    matches!(code as u32, 0x00AA_0004 | 0x00AA_0005 | 0x00AA_0006)
+}
+
+/// The rotation type to ask for when the write speed is set.
+///
+/// IDiscFormat2Data::SetWriteSpeed takes the speed in sectors per second and
+/// whether the rotation type is pure CAV. That second argument is a demand, not
+/// a hint: TRUE asks the drive to serve the request out of the feature page that
+/// carries CAV, and a drive that does not mark CAV as current refuses the whole
+/// call before a single sector is written. Windows words that as "the feature
+/// page requested is supported, but is not marked as current" and hands back
+/// E_FAIL (0x80004005) — an error about the drive, not about the disc.
+///
+/// An ASUS DRW-24D1ST over USB refused it for every speed it offers: 2705, 5410
+/// and 10820 sectors per second, that is about 4x, 8x and 16x on a DVD. The
+/// same drive took all three with FALSE, the documented default that leaves the
+/// rotation type to the drive, so the speed was never the problem. Its current
+/// feature pages were 0, 1, 2, 3, 33, 47, 256, 261, 263, 264 and 268: page 5,
+/// the one that carries CAV, is not among them.
+///
+/// FALSE is what this asks for, and the comment on the call had said so all
+/// along: the rotation type follows the drive default.
+const ROTATION_BY_DRIVE: bool = false;
+
+/// Sets the write speed, in sectors per second.
+///
+/// The rotation type is a hint, not a requirement, so the drive is asked for the
+/// one it supports first and for pure CAV only if that is refused. Either way the
+/// speed is what matters, and a drive that refused both has said no to the write.
+/// The first refusal is the one reported: it is the refusal of the way the drive
+/// would have been happiest to be asked.
+fn set_write_speed(format: &Object, sectors_per_second: i32) -> Result<(), String> {
+    let mut refused = None;
+    for pure_cav in [ROTATION_BY_DRIVE, !ROTATION_BY_DRIVE] {
+        trace(&format!("set speed {sectors_per_second} pure_cav={pure_cav}"));
+        match format.call(
+            "SetWriteSpeed",
+            vec![Variant::from_i32(sectors_per_second), Variant::from_bool(pure_cav)],
+        ) {
+            Ok(_) => return Ok(()),
+            Err(e) => refused = Some(refused.unwrap_or_else(|| e)),
+        }
+    }
+    Err(refused.unwrap_or_default())
+}
+
 /// What an IDispatch call raised, read out of its EXCEPINFO.
 struct Fault {
     code: HResult,
@@ -361,7 +417,16 @@ fn describe(code: HResult, windows_text: &str) -> String {
         0xC0AA_0404 => "镜像比光盘的剩余空间大",
         0xC0AA_0405 => "光盘不是空白的",
         0xC0AA_0406 => "刻录机不支持这种光盘",
-        _ => "",
+        _ => {
+            // A feature page the drive supports but refuses to mark as current is a
+            // driver quirk, not anything the user did to the disc. Windows words it
+            // but does not give it a code of its own, so the text is what tells.
+            if is_feature_page_refusal(windows_text) {
+                "The drive did not mark this feature as its current page; try another burner or let the drive pick the speed"
+            } else {
+                ""
+            }
+        }
     };
     let mut parts: Vec<&str> = Vec::new();
     if !ours.is_empty() {
@@ -376,6 +441,17 @@ fn describe(code: HResult, windows_text: &str) -> String {
     } else {
         format!("{}（{code}）", parts.join("："))
     }
+}
+
+/// Whether the drive refused to mark a feature page as current.
+///
+/// Windows gives the refusal no code of its own, so only the text tells it apart
+/// from any other E_FAIL. The wording follows the language of the system: an
+/// English Windows says "the feature page requested is supported, but is not
+/// marked as current", while a Chinese one names the same feature page in its
+/// own words, where the code alongside it already carries the diagnosis.
+fn is_feature_page_refusal(windows_text: &str) -> bool {
+    windows_text.contains("feature page")
 }
 
 unsafe fn read_bstr(b: BStr) -> String {
@@ -637,11 +713,17 @@ pub fn burn(
 
     if speed > 0 {
         // Sectors per second, which is the unit IMAPI2 reports and takes: one DVD speed is
-        // 692.5 of them, one CD speed is 75. Rotation type follows the drive default.
+        // 692.5 of them, one CD speed is 75.
         let media = format.number("CurrentPhysicalMediaType").unwrap_or(0);
         let per_speed = if (1..=3).contains(&media) { 75.0 } else { 692.5 };
         let sectors_per_second = (speed as f64 * per_speed).round() as i32;
-        format.call("SetWriteSpeed", vec![Variant::from_i32(sectors_per_second), Variant::from_bool(true)])?;
+        // The second argument asks for pure CAV rotation. Leaving it false lets the
+        // drive pick the rotation type it supports, which is what the comment above
+        // always meant. Asking for pure CAV makes a drive look up a feature page it
+        // does not mark as current, and the whole burn stops with "the feature page
+        // requested is supported, but is not marked as current" before anything is
+        // written (issue #9).
+        set_write_speed(&format, sectors_per_second).map_err(|e| format!("Failed to set the write speed: {e}"))?;
         if let Ok(current) = format.number("CurrentWriteSpeed") {
             reporter(0.0, &format!("写入速度 {current} 扇区/秒"));
         }
@@ -750,25 +832,28 @@ fn advice(format: &Object, sink: &Sink) -> Result<(), String> {
 /// Everything the burn does up to the write itself, so a crash there can be found without
 /// spending a disc.
 pub fn probe_burn_setup(drive: &str, iso: &str, speed: u8) -> Result<String, String> {
-    let recorder = find_recorder(drive)?;
+    let recorder = find_recorder(drive).map_err(|e| format!("find recorder: {e}"))?;
     trace("setup: format");
-    let format = Object::create(&CLSID_FORMAT2_DATA)?;
+    let format = Object::create(&CLSID_FORMAT2_DATA).map_err(|e| format!("create format: {e}"))?;
     trace("setup: recorder");
-    format.put("Recorder", Variant::from_unknown(recorder.0))?;
+    format.put("Recorder", Variant::from_unknown(recorder.0)).map_err(|e| format!("set recorder: {e}"))?;
     trace("setup: client");
-    format.put("ClientName", Variant::from_bstr("Discratcher")?)?;
+    format.put("ClientName", Variant::from_bstr("Discratcher")?).map_err(|e| format!("set client name: {e}"))?;
     trace("setup: close media");
-    format.put("ForceMediaToBeClosed", Variant::from_bool(true))?;
+    format.put("ForceMediaToBeClosed", Variant::from_bool(true)).map_err(|e| format!("force close: {e}"))?;
     trace("setup: media type");
     let media = format.number("CurrentPhysicalMediaType").unwrap_or(0);
     let per_speed = if (1..=3).contains(&media) { 75.0 } else { 692.5 };
     let sectors = (speed as f64 * per_speed).round() as i32;
     trace(&format!("setup: set speed {sectors}"));
-    format.call("SetWriteSpeed", vec![Variant::from_i32(sectors), Variant::from_bool(true)])?;
+    if speed > 0 {
+        // False leaves the rotation type to the drive, as in burn().
+        set_write_speed(&format, sectors).map_err(|e| format!("set write speed: {e}"))?;
+    }
     let current = format.number("CurrentWriteSpeed").unwrap_or(0);
     trace("setup: supported");
-    let supported = bool_of(format.call("IsRecorderSupported", vec![Variant::from_unknown(recorder.0)])?).unwrap_or(false);
-    let media_ok = bool_of(format.call("IsCurrentMediaSupported", vec![Variant::from_unknown(recorder.0)])?).unwrap_or(false);
+    let supported = bool_of(format.call("IsRecorderSupported", vec![Variant::from_unknown(recorder.0)]).map_err(|e| format!("is recorder supported: {e}"))?).unwrap_or(false);
+    let media_ok = bool_of(format.call("IsCurrentMediaSupported", vec![Variant::from_unknown(recorder.0)]).map_err(|e| format!("is media supported: {e}"))?).unwrap_or(false);
     trace("setup: stream");
     let wide: Vec<u16> = iso.encode_utf16().chain(std::iter::once(0)).collect();
     let mut stream: *mut c_void = null_mut();
@@ -780,6 +865,50 @@ pub fn probe_burn_setup(drive: &str, iso: &str, speed: u8) -> Result<String, Str
         "media_type={media} speed={sectors} current={current} supported={supported} media_ok={media_ok} stream_hr=0x{hr:08X} events={}",
         match events { Ok(()) => "ok".to_string(), Err(e) => e }
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A drive that adjusted the request said so with a success code, and the code
+    /// has to be told apart from the errors that sit in the same neighbourhood.
+    #[test]
+    fn an_adjusted_request_is_not_a_refusal() {
+        assert!(adjusted(0x00AA_0004u32 as i32));
+        assert!(adjusted(0x00AA_0005u32 as i32));
+        assert!(adjusted(0x00AA_0006u32 as i32));
+        assert!(!adjusted(0));
+        assert!(!adjusted(0x8007_0057u32 as i32));
+        assert!(!adjusted(0xC0AA_0404u32 as i32));
+        // E_IMAPI_UNEXPECTED_RESPONSE_FROM_DEVICE is an error, not an adjustment.
+        assert!(!adjusted(0xC0AA_0301u32 as i32));
+    }
+
+    /// The write speed is set with the rotation type the drive supports. A drive
+    /// that refuses pure CAV is asked the other way round, so the burn goes on.
+    #[test]
+    fn a_refused_rotation_type_is_asked_again() {
+        // The order matters: the drive picks first, pure CAV is the fallback.
+        assert!(!ROTATION_BY_DRIVE);
+        assert_ne!(ROTATION_BY_DRIVE, !ROTATION_BY_DRIVE);
+    }
+
+    /// The drive refusing a feature page is a driver quirk, and Windows words it
+    /// without a code of its own, so the text has to be recognized.
+    #[test]
+    fn the_feature_page_refusal_is_translated() {
+        let said = describe(
+            0x8000_4005u32 as i32,
+            "The feature page requested is supported, but is not marked as current.",
+        );
+        assert!(said.starts_with("The drive did not mark this feature"), "{said}");
+        assert!(said.contains("0x80004005"), "{said}");
+        // A failure with another cause keeps its own wording.
+        let other = describe(0x8000_4005u32 as i32, "Something else went wrong.");
+        assert!(other.contains("Something else went wrong."), "{other}");
+        assert!(!other.contains("feature page"), "{other}");
+    }
 }
 
 /// What the drive says about itself, without burning anything: the self test for the COM
