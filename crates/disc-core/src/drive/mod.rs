@@ -264,6 +264,62 @@ pub mod mmc {
         }
     }
 
+    /// READ DISC STRUCTURE. The allocation length sits in bytes 8 and 9 here, not in
+    /// the bytes 6 and 7 that the other commands use. A drive handed the wrong
+    /// place answers with an empty buffer instead of an error, which is
+    /// indistinguishable from a disc that has nothing to say.
+    pub fn read_disc_structure(format: u8, allocation: u16) -> [u8; 10] {
+        [0xAD, 0, format, 0, 0, 0, 0, 0, (allocation >> 8) as u8, allocation as u8]
+    }
+
+    /// One record of the disc structure: an index, six characters of text and a
+    /// terminator.
+    const RECORD_BYTES: usize = 8;
+
+    /// The disc's own identification code, out of a READ DISC STRUCTURE answer.
+    ///
+    /// The structure is a table of fixed eight byte records. Two of them hold
+    /// text, the maker and the media code, and together they spell the MID the
+    /// DVD Forum has printed on recordable discs since 2000: a DVD-R from
+    /// Mitsubishi reads "MCC 03" and "RG20" there and makes "MCC 03RG20", the
+    /// string the calibration library files that disc under.
+    ///
+    /// A drive that answers with something else has nothing to say, and the disc
+    /// is then named by hand.
+    pub fn parse_medium_id(b: &[u8]) -> Option<String> {
+        (0..b.len())
+            .filter(|at| is_record_table(b, *at, 1) || is_record_table(b, *at, 0))
+            .find_map(|at| {
+                let text = |index: usize| {
+                    let start = at + (index - 1) * RECORD_BYTES;
+                    text_field(b.get(start + 1..start + RECORD_BYTES)?)
+                };
+                let mid = format!("{}{}", text(3)?, text(4)?).trim_end().to_string();
+                (!mid.is_empty()).then_some(mid)
+            })
+    }
+
+    /// Is a record table here, with its first record numbered `first`? The records
+    /// count up one by one and every one of them ends in a zero, which no run of
+    /// bytes does by accident.
+    ///
+    /// The numbers are what tells the tables apart. The run of zero bytes in front
+    /// of the real one looks like a table of its own, one record off, and a
+    /// table found that way would read the wrong fields.
+    fn is_record_table(b: &[u8], at: usize, first: u8) -> bool {
+        (0..4).all(|k| b.get(at + k * RECORD_BYTES) == Some(&first.wrapping_add(k as u8)))
+            && (0..4).all(|k| b.get(at + k * RECORD_BYTES + RECORD_BYTES - 1) == Some(&0))
+    }
+
+    /// The text of one record: what is printed there, when it is text at all.
+    fn text_field(field: &[u8]) -> Option<String> {
+        let chars: Vec<u8> = field.iter().take_while(|&&c| c != 0).copied().collect();
+        if chars.is_empty() || !chars.iter().all(|&c| (32..127).contains(&c)) {
+            return None;
+        }
+        Some(String::from_utf8(chars).ok()?)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -311,6 +367,59 @@ pub mod mmc {
             assert_eq!(disc_status(&[0, 0, 0x1E]), 2);
             // A reply too short to hold the field must not read as blank.
             assert_eq!(disc_status(&[]), 2);
+        }
+
+        /// A disc structure as a drive returns it: a header of zeros, then one
+        /// record per field, each an index, six characters and a terminator.
+        fn disc_structure(records: &[&[u8]]) -> Vec<u8> {
+            let mut b = vec![0u8; 40 + records.len() * RECORD_BYTES];
+            for (i, r) in records.iter().enumerate() {
+                let at = 40 + i * RECORD_BYTES;
+                b[at] = (i + 1) as u8;
+                for (j, c) in r.iter().take(6).enumerate() {
+                    b[at + 1 + j] = *c;
+                }
+            }
+            b
+        }
+
+        #[test]
+        fn the_mid_is_the_maker_and_the_media_code() {
+            // What a Mitsubishi DVD-R answered: two binary fields, then the maker
+            // and the media code, then more binary fields.
+            let b = disc_structure(&[
+                b"\x40\xc1\xfd\x9e\xd8\x52",
+                b"\x85\x0d\x0e\x88\x9a\x80",
+                b"MCC 03",
+                b"RG20  ",
+                b"\x88\x80",
+                b"\x88\x80",
+            ]);
+            assert_eq!(parse_medium_id(&b).as_deref(), Some("MCC 03RG20"));
+        }
+
+        #[test]
+        fn a_dvd_plus_disc_reads_the_same_way() {
+            let b = disc_structure(&[b"\x40\xc1\xfd\x9e\xd8\x52", b"\x85\x0d\x0e\x88\x9a\x80", b"OPTODI", b"SCR016", b"\x88\x80"]);
+            assert_eq!(parse_medium_id(&b).as_deref(), Some("OPTODISCR016"));
+        }
+
+        #[test]
+        fn a_structure_without_the_table_has_no_mid() {
+            assert_eq!(parse_medium_id(&[]), None);
+            assert_eq!(parse_medium_id(&[0u8; 64]), None);
+            // A table whose third and fourth records are binary carries no code.
+            let b = disc_structure(&[b"MCC 03", b"RG20  ", b"\x88\x80", b"\x88\x80", b"\x88\x80"]);
+            assert_eq!(parse_medium_id(&b), None);
+        }
+
+        #[test]
+        fn the_structure_command_puts_its_length_where_the_drive_looks() {
+            // Bytes 8 and 9, not bytes 6 and 7: the wrong place comes back empty.
+            let c = read_disc_structure(0x00, 0x1000);
+            assert_eq!(c[0], 0xAD);
+            assert_eq!(&c[8..10], &[0x10, 0x00]);
+            assert_eq!(&c[6..8], &[0, 0]);
         }
 
         #[test]
