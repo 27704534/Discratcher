@@ -47,6 +47,9 @@ const INQUIRY: [u8; 6] = [0x12, 0, 0, 0, 36, 0];
 /// GET CONFIGURATION with RT=1: the current profile of the loaded medium.
 const GET_CURRENT_PROFILE: [u8; 10] = [0x46, 0x01, 0, 0, 0, 0, 0, 0, 8, 0];
 const READ_DISC_INFORMATION: [u8; 10] = [0x51, 0, 0, 0, 0, 0, 0, 0, 34, 0];
+/// READ DISC STRUCTURE answers with a structure a couple of kilobytes long; the
+/// maker and the media code sit well past the header.
+const DISC_STRUCTURE_BYTES: usize = 4096;
 
 /// STORAGE_DEVICE_NUMBER, filled in by IOCTL_STORAGE_GET_DEVICE_NUMBER.
 #[repr(C)]
@@ -125,6 +128,7 @@ fn command_name(op: u8) -> &'static str {
         0xA8 => "READ(12)",
         0xBE => "READ CD",
         0xBB => "SET CD SPEED",
+        0xAD => "READ DISC STRUCTURE",
         _ => "SCSI 命令",
     }
 }
@@ -273,6 +277,16 @@ impl WinDrive {
         Some(mmc::disc_status(&b))
     }
 
+    /// The disc's own identification code, out of the structure the drive reads
+    /// for itself. It is the one number that says which disc this is, so a
+    /// calibration can be looked up by the disc in the drive instead of by hand.
+    /// A drive that will not answer leaves the code empty.
+    fn media_id(&mut self) -> Option<String> {
+        let mut b = vec![0u8; DISC_STRUCTURE_BYTES];
+        self.exec(&mmc::read_disc_structure(0x00, DISC_STRUCTURE_BYTES as u16), Some(&mut b[..])).ok()?;
+        mmc::parse_medium_id(&b)
+    }
+
     /// Everything the rest of the app expects, from as few commands as will answer.
     fn info(&mut self, id: &str) -> OpticalDriveInfo {
         let (vendor, product, revision) = self.inquiry().unwrap_or_default();
@@ -299,8 +313,11 @@ impl WinDrive {
         // and the nominal size at least matches the disc in the tray.
         let reported = self.read_capacity().unwrap_or(0);
         info.total_sectors = if reported < 2 { mmc::nominal_sectors(&info.media_type) } else { reported };
-        // media_id stays empty: READ DISC STRUCTURE never returns on some USB bridges
-        // (measured on a GUD1N over USB), and a preset can also be picked by hand.
+        // The disc names itself, so the app can tell which disc is in the drive
+        // without the user typing a code. Not every drive answers: a USB bridge
+        // that never returns the structure leaves it empty, and a preset can
+        // still be picked by hand.
+        info.media_id = self.media_id().unwrap_or_default();
         //
         // Both sides of the pair matter: a 16x disc in an 8x drive is written at 8x.
         let raw = imapi_write_speeds(id, (info.total_sectors, info.is_blank));
@@ -558,9 +575,12 @@ mod tests {
         let letter = drive_letter(&d.id).expect("盘符查不到");
         eprintln!("drive letter: {letter}");
         assert_eq!(device_number(&format!(r"\\.\{letter}")), device_number(&d.id));
-        if d.media_present {
+        for d in drives.iter().filter(|d| d.media_present) {
             assert!(d.total_sectors > 1000, "有盘却只有 {} 个扇区", d.total_sectors);
-        } else {
+            // The disc names itself; a drive that cannot say leaves it empty.
+            assert!(!d.media_id.is_empty(), "{} holds a disc whose MID cannot be read", d.product);
+        }
+        if !d.media_present {
             assert_eq!(d.total_sectors, 0, "空仓不该报容量");
             assert_eq!(d.media_type, "None");
         }

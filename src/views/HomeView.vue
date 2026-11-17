@@ -16,6 +16,7 @@
       <div><dt>{{ t('home.sectors') }}</dt><dd>2,295,104</dd></div>
       <div><dt>{{ t('home.accuracy') }}</dt><dd>0.34°</dd></div>
       <div v-if="s.preset?.stamperCode"><dt>{{ t('home.code') }}</dt><dd class="selectable">{{ s.preset.stamperCode }}</dd></div>
+      <div v-if="s.preset?.mediaId"><dt>{{ t('home.mid') }}</dt><dd class="selectable">{{ s.preset.mediaId }}</dd></div>
     </dl>
   </section>
 </template>

@@ -147,6 +147,13 @@ watch(
   { immediate: true },
 )
 
+// The drive names the disc it holds, so the library can be searched for exactly
+// that disc without typing anything. What the user typed is never overwritten.
+watch([() => s.view, () => s.drive?.mediaId], ([view, mid]) => {
+  if (view !== 'models' || !mid || query.value) return
+  query.value = mid
+})
+
 /** A download saves the geometry and stays put; the row turns local and can then be used. */
 async function use(r: Row) {
   saving.value = r.id
