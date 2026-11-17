@@ -44,11 +44,12 @@ pub fn wrote_everything(furthest_action: i64, last_lba: i64, sectors: i64) -> bo
 }
 
 /// Command line for the platforms that burn with an external tool. Windows burns in process
-/// through IMAPI2 instead, so this is only reached from macOS and Linux.
-pub fn burn_command(drive_id: &str, iso: &str, speed: u8, verify: bool) -> Result<Vec<String>, String> {
+/// through IMAPI2 instead, so this is only reached from macOS and Linux. `erase` asks the
+/// tool to erase a rewritable disc first; it comes from a drive the app listed as reusable.
+pub fn burn_command(drive_id: &str, iso: &str, speed: u8, verify: bool, erase: bool) -> Result<Vec<String>, String> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (drive_id, iso, speed, verify);
+        let _ = (drive_id, iso, speed, verify, erase);
         return Err("这个平台没有刻录后端".into());
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -56,6 +57,11 @@ pub fn burn_command(drive_id: &str, iso: &str, speed: u8, verify: bool) -> Resul
     #[cfg(target_os = "macos")]
     {
         let mut a = vec!["hdiutil".to_string(), "burn".into(), iso.into(), "-puppetstrings".into(), "-speed".into(), speed.to_string()];
+        // Quick erase of a CD-RW, DVD-RW or DVD+RW: the only way a written rewritable
+        // disc can be burned again. Nothing else in the app erases anything.
+        if erase {
+            a.push("-erase".into());
+        }
         if !verify {
             a.push("-noverifyburn".into());
         }
@@ -64,26 +70,14 @@ pub fn burn_command(drive_id: &str, iso: &str, speed: u8, verify: bool) -> Resul
     #[cfg(target_os = "linux")]
     {
         let mut a = vec!["growisofs".to_string(), "-dvd-compat".into(), format!("-speed={speed}")];
-        let _ = verify;
+        // growisofs overwrites a DVD+RW by itself; nothing here erases anything yet.
+        let _ = (verify, erase);
         a.push("-Z".into());
         a.push(format!("{drive_id}={iso}"));
         return Ok(a);
     }
     #[allow(unreachable_code)]
     Err("这个平台没有刻录后端".into())
-}
-
-/// The virtual drive's burn: it walks the same progress a real one reports and writes
-/// nothing, so the whole burn page and what follows it can be tried without a disc.
-pub fn burn_simulated(step: Duration, cancel: &AtomicBool, on_progress: &mut dyn FnMut(BurnProgress)) -> Result<(), String> {
-    for percent in (0..=100).step_by(2) {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("已取消".into());
-        }
-        on_progress(BurnProgress { percent: Some(percent as f64), message: "模拟写入，不会写入任何光盘".into() });
-        std::thread::sleep(step);
-    }
-    Ok(())
 }
 
 /// Asks the tool to stop, so it can release the drive itself.
@@ -185,6 +179,20 @@ mod tests {
     }
 
     #[test]
+    fn a_rewritable_disc_is_erased_by_the_burner_itself() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let plain = burn_command("disk8", "a.iso", 4, true, false).unwrap();
+        assert!(!plain.iter().any(|a| a == "-erase"), "{plain:?}");
+        let again = burn_command("disk8", "a.iso", 4, true, true).unwrap();
+        assert!(again.iter().any(|a| a == "-erase"), "{again:?}");
+        // Still one burn command: the erase is part of writing, not a step of its own.
+        assert_eq!(again[0], "hdiutil");
+        assert_eq!(again[1], "burn");
+    }
+
+    #[test]
     fn reports_tool_failure_text() {
         let argv = ["sh", "-c", "echo boom 1>&2; exit 3"].map(String::from);
         assert_eq!(burn(&argv, &AtomicBool::new(false), &mut |_| {}).unwrap_err(), "boom");
@@ -203,20 +211,5 @@ mod tests {
         assert_eq!(r.unwrap_err(), "已取消");
         assert_eq!(seen, Some(10.0));
         assert!(t.elapsed() < Duration::from_secs(5));
-    }
-}
-
-#[cfg(test)]
-mod sim_tests {
-    use super::*;
-
-    #[test]
-    fn simulated_burn_reports_to_completion_and_obeys_cancel() {
-        let cancel = AtomicBool::new(false);
-        let mut last = None;
-        burn_simulated(Duration::ZERO, &cancel, &mut |p| last = p.percent).unwrap();
-        assert_eq!(last, Some(100.0));
-        cancel.store(true, Ordering::Relaxed);
-        assert_eq!(burn_simulated(Duration::ZERO, &cancel, &mut |_| {}), Err("已取消".into()));
     }
 }

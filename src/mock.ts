@@ -8,11 +8,11 @@ export function on(e: string, cb: (p: unknown) => void) {
   handlers.get(e)!.add(cb)
   return () => handlers.get(e)!.delete(cb)
 }
-// Set from the console to try each state: 'none', 'blank' or 'written'.
+// Set from the console to try each state: 'none', 'blank', 'written', 'cd' or 'rw'.
 declare global { var __mockDisc: string | undefined }
 const media = () => globalThis.__mockDisc ?? 'none'
 /** Browser-only: put a disc in the mock drive so the whole flow can run. */
-export function setMockDisc(state: 'none' | 'blank' | 'written' | 'cd') {
+export function setMockDisc(state: 'none' | 'blank' | 'written' | 'cd' | 'rw') {
   globalThis.__mockDisc = state
 }
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -24,7 +24,7 @@ const demo = {
   rmsResidualDeg: 0.402, measuredSpanMm: [25.292, 56.914], createdAt: '2026-11-06T21:53:00+08:00',
 }
 let saved: { id: string }[] = []
-let log: { id: string }[] = []
+const log: { id: string }[] = []
 let stop = false
 const compositions = new Map<string, unknown>()
 const disc = (size: number, dark: number) => {
@@ -86,10 +86,13 @@ export const openUrl = (url: string) => {
 }
 export async function call(cmd: string, a: Record<string, any>): Promise<unknown> {
   switch (cmd) {
-    case 'list_optical_drives':
-      return [{ id: '', vendor: 'HL-DT-ST', product: 'DVDRAM GUD1N', revision: '1.01', mediaPresent: media() !== 'none', mediaType: media() === 'none' ? 'None' : media() === 'cd' ? 'CD-R' : 'DVD-R', mediaId: media() === 'none' ? '' : 'CMC MAG. AM3', totalSectors: media() === 'cd' ? 359843 : 2295104, isBlank: media() === 'blank' || media() === 'cd', simulated: false, writeSpeeds: media() === 'cd' ? [10, 16, 24] : undefined, supported: media() !== 'none' }]
+    case 'list_optical_drives': {
+      const m = media()
+      return [{ id: '', vendor: 'HL-DT-ST', product: 'DVDRAM GUD1N', revision: '1.01', mediaPresent: m !== 'none', mediaType: m === 'none' ? 'None' : m === 'cd' ? 'CD-R' : m === 'rw' ? 'DVD+RW' : 'DVD-R', mediaId: m === 'none' ? '' : 'CMC MAG. AM3', totalSectors: m === 'cd' ? 359843 : 2295104, isBlank: m === 'blank' || m === 'cd', writeSpeeds: m === 'cd' ? [10, 16, 24] : m === 'rw' ? [2, 4] : undefined, supported: m !== 'none', reusable: m === 'rw' }]
+    }
+    case 'eject_disc': setMockDisc('none'); return null
     case 'inspect_disc':
-      return ({ none: 'none', cd: 'blank', blank: 'blank', written: 'calibration' } as Record<string, string>)[media()] ?? 'none'
+      return ({ none: 'none', cd: 'blank', blank: 'blank', written: 'calibration', rw: 'other' } as Record<string, string>)[media()] ?? 'none'
     case 'check_calibration_disc':
       return { sectors: 2295104, foreign: false }
     case 'make_twist_chart': return '/Users/demo/twist-chart.png'
@@ -137,9 +140,7 @@ export async function call(cmd: string, a: Record<string, any>): Promise<unknown
       rungs.forEach((r, i) => (r.cubicPitchResidualDeg = Math.sin(i * 2.1) * 0.35))
       return { preset: { ...demo, id: '' }, rungs, constantRmsDeg: 0.715, cubicRmsDeg: 0.402, spindlePeriodMs: 25.474, suspect: false }
     }
-    case 'get_calibration_log': return [...log].reverse()
     case 'add_calibration_record': log.push(a.record); return null
-    case 'delete_calibration_record': log = log.filter((r) => r.id !== a.id); return null
     case 'cancel_job': stop = true; return null
     case 'cache_iso_path': return `/cache/${a.name}`
     case 'burn_iso_to_drive':

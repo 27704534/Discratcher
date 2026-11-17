@@ -1,7 +1,8 @@
 //! Drive access. Measurement code talks to `TimedDrive`, so the ladder runs
-//! unchanged on real hardware and on the simulator.
+//! unchanged on real hardware and on the tests' simulator.
 
 pub mod burner;
+#[cfg(test)]
 pub mod sim;
 
 #[cfg(target_os = "linux")]
@@ -16,8 +17,6 @@ pub mod windows;
 use crate::media::Media;
 use serde::{Deserialize, Serialize};
 
-pub const SIM_DRIVE_ID: &str = "sim://gud1n";
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpticalDriveInfo {
@@ -31,8 +30,6 @@ pub struct OpticalDriveInfo {
     pub total_sectors: u32,
     pub is_blank: bool,
     #[serde(default)]
-    pub simulated: bool,
-    #[serde(default)]
     pub write_speeds: Vec<u8>,
     #[serde(default)]
     pub max_write_speed: u8,
@@ -40,6 +37,10 @@ pub struct OpticalDriveInfo {
     /// `list_drives`, so no backend can forget it.
     #[serde(default)]
     pub supported: bool,
+    /// A written rewritable disc this platform's burner erases before it writes, so it
+    /// can be used again. Filled in by `list_drives`, so no backend can forget it.
+    #[serde(default)]
+    pub reusable: bool,
 }
 
 /// Single-layer DVD and CD only: calibration and carving count the channel bits of
@@ -47,6 +48,18 @@ pub struct OpticalDriveInfo {
 /// as noise. Anything not named, including a type nobody could read, is refused.
 pub fn is_supported_media(media_type: &str) -> bool {
     Media::of_type(media_type).is_some()
+}
+
+/// Discs that can be written again, and so do not have to be new to be used.
+pub fn is_rewritable(media_type: &str) -> bool {
+    matches!(media_type.trim(), "CD-RW" | "DVD-RW" | "DVD+RW")
+}
+
+/// Whether this platform's burner erases a rewritable disc on its own before writing it.
+/// hdiutil does; the others have no erase step wired in yet, so a written disc stays
+/// unusable there rather than being burned over blindly.
+pub fn erases_before_burn() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// Where this platform's burner puts the 2048 user bytes inside a CD sector: IMAPI2 writes
@@ -115,14 +128,20 @@ pub trait TimedDrive: Send {
     fn host_wait(&mut self, ns: u64);
 }
 
+/// Whether the system stopped answering about drives, so an empty list says nothing about
+/// what is plugged in. Only macOS is known to get into this state.
+pub fn stuck() -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::stuck();
+    #[allow(unreachable_code)]
+    false
+}
+
 pub fn list_drives() -> Vec<OpticalDriveInfo> {
     let mut v = native_list();
-    // Development only: a user must never mistake the simulator for hardware.
-    if cfg!(debug_assertions) {
-        v.push(sim::drive_info());
-    }
     for d in &mut v {
         d.supported = d.media_present && is_supported_media(&d.media_type);
+        d.reusable = d.media_present && !d.is_blank && is_rewritable(&d.media_type) && erases_before_burn();
     }
     v
 }
@@ -138,11 +157,8 @@ fn native_list() -> Vec<OpticalDriveInfo> {
     Vec::new()
 }
 
-/// Open a drive for timing reads. `paced` slows the simulator so progress can be watched.
-pub fn open_timed(id: &str, paced: bool) -> Result<Box<dyn TimedDrive>, String> {
-    if id == SIM_DRIVE_ID {
-        return Ok(Box::new(sim::SimDrive::demo(paced)));
-    }
+/// Open a drive for timing reads.
+pub fn open_timed(id: &str) -> Result<Box<dyn TimedDrive>, String> {
     #[cfg(target_os = "macos")]
     return macos::open(id);
     #[cfg(target_os = "linux")]
@@ -153,23 +169,69 @@ pub fn open_timed(id: &str, paced: bool) -> Result<Box<dyn TimedDrive>, String> 
     Err("这个平台没有光驱后端".into())
 }
 
-/// Write speeds to offer for a blank disc. "offered" is what the drive itself
-/// reported; "detected_max" is the drive's own limit, which wins over what the disc
-/// claims: a 16x disc in an 8x drive is 8x. With nothing reported at all, guess low
-/// rather than offer a speed nobody confirmed.
+/// Open the tray. On macOS the drive's own button does nothing while a disc is mounted,
+/// and the Finder cannot eject a disc that an interrupted session left unmounted.
+pub fn eject(id: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return macos::eject(id);
+    #[cfg(target_os = "linux")]
+    return linux::eject(id);
+    #[cfg(target_os = "windows")]
+    return windows::eject(id);
+    #[allow(unreachable_code)]
+    Err("这个平台没有光驱后端".into())
+}
+
+/// Open a drive to read one disc, leaving the drive to the system where the platform can.
+/// The timing path takes the drive exclusively on macOS, and with it the ability to eject
+/// it, so a read that only decides what the disc is must not go through it.
+pub fn open_reader(id: &str) -> Result<Box<dyn TimedDrive>, String> {
+    #[cfg(target_os = "macos")]
+    if let Ok(d) = macos::open_reader(id) {
+        return Ok(d);
+    }
+    open_timed(id)
+}
+
+/// Whether the burn should ask the tool to erase first. Any rewritable disc, blank or not:
+/// on a fresh one the same step is what formats it, and on a written one it is the only
+/// way it can be written again. Nothing erases anything outside a burn the user started.
+pub fn needs_erase(media_type: &str) -> bool {
+    is_rewritable(media_type) && erases_before_burn()
+}
+
+/// Write speeds to offer for a blank disc, or for a rewritable one the burner erases
+/// first. "offered" is what the drive itself reported; "detected_max" is the drive's own
+/// limit, which wins over what the disc claims: a 16x disc in an 8x drive is 8x. With
+/// nothing reported at all, guess low rather than offer a speed nobody confirmed.
 pub fn derive_write_speeds(
     media_type: &str,
     is_blank: bool,
     offered: Vec<u8>,
     detected_max: Option<u8>,
 ) -> (Vec<u8>, u8) {
-    if !is_blank {
+    let rewritable = is_rewritable(media_type) && erases_before_burn();
+    if !is_blank && !rewritable {
         return (Vec::new(), 0);
     }
     let is_cd = media_type.to_ascii_uppercase().contains("CD");
-    let default_ladder = if is_cd { vec![4, 8, 10, 16, 24, 32, 40, 48] } else { vec![2, 4, 6, 8, 12, 16] };
+    // An erased disc has no dye to read an optimum off, and the drive often reports
+    // nothing for it, so a rewritable disc is only ever offered the slow, safe end.
+    let default_ladder = if rewritable {
+        if is_cd {
+            vec![4]
+        } else {
+            vec![2, 4]
+        }
+    } else if is_cd {
+        vec![4, 8, 10, 16, 24, 32, 40, 48]
+    } else {
+        vec![2, 4, 6, 8, 12, 16]
+    };
 
-    let max_speed = detected_max.or_else(|| offered.iter().copied().max()).unwrap_or(if is_cd { 16 } else { 4 });
+    let max_speed = detected_max
+        .or_else(|| offered.iter().copied().max())
+        .unwrap_or(if rewritable || !is_cd { 4 } else { 16 });
 
     let mut speeds: Vec<u8> = offered.into_iter().filter(|&s| s <= max_speed).collect();
     if speeds.is_empty() {
@@ -448,11 +510,36 @@ mod tests {
 
     #[test]
     fn only_single_layer_dvd_and_cd_are_supported() {
-        for m in ["DVD-R", "DVD+R", "DVD-RW", "DVD+RW", " DVD-R ", "CD-R", "CD-RW", "CD-ROM"] {
+        for m in ["DVD-R", "DVD+R", "DVD-RW", "DVD+RW", " DVD-R ", "DVD-ROM", "CD-R", "CD-RW", "CD-ROM"] {
             assert!(is_supported_media(m), "{m}");
         }
-        for m in ["BD-R", "BD-RE", "DVD+R DL", "DVD-RAM", "DVD-ROM", "None", ""] {
+        for m in ["BD-R", "BD-RE", "DVD+R DL", "DVD-RAM", "None", ""] {
             assert!(!is_supported_media(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn only_rewritable_discs_can_be_written_again() {
+        for m in ["CD-RW", "DVD-RW", "DVD+RW", " DVD-RW "] {
+            assert!(is_rewritable(m), "{m}");
+        }
+        for m in ["CD-R", "DVD-R", "DVD+R", "DVD+R DL", "BD-RE", "CD-ROM", "None", ""] {
+            assert!(!is_rewritable(m), "{m}");
+        }
+    }
+
+    #[test]
+    fn a_rewritable_disc_is_offered_the_slow_end_only() {
+        // A written disc is only worth a speed where the burner erases it first.
+        let expected = if erases_before_burn() { (vec![2, 4], 4) } else { (Vec::new(), 0) };
+        assert_eq!(derive_write_speeds("DVD+RW", false, Vec::new(), None), expected);
+        let cd_expected = if erases_before_burn() { (vec![4], 4) } else { (Vec::new(), 0) };
+        assert_eq!(derive_write_speeds("CD-RW", false, Vec::new(), None), cd_expected);
+        // A written disc that cannot be written again is still offered nothing.
+        assert_eq!(derive_write_speeds("DVD-R", false, vec![2, 4], Some(8)), (Vec::new(), 0));
+        // What the drive reported is kept, up to the drive's own limit.
+        if erases_before_burn() {
+            assert_eq!(derive_write_speeds("DVD+RW", false, vec![2, 4, 8], Some(4)), (vec![2, 4], 4));
         }
     }
 

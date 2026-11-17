@@ -1,8 +1,7 @@
 //! A simulated drive on a virtual clock. It proves program logic only: real drives add
 //! cache timing, whole-turn rereads and speed changes that no simulator settles.
 
-use super::{OpticalDriveInfo, TimedDrive, TimedRead, SIM_DRIVE_ID};
-use crate::ecma267::DEFAULT_TOTAL_SECTORS;
+use super::{TimedDrive, TimedRead};
 use crate::media::Media;
 use crate::preset::reference_preset;
 use crate::rng::SplitMix64;
@@ -23,23 +22,6 @@ pub struct SimDrive {
     head_lba: u32,
     cached_block: Option<u32>,
     rng: SplitMix64,
-    pace_us: u64,
-}
-
-pub fn drive_info() -> OpticalDriveInfo {
-    OpticalDriveInfo {
-        id: SIM_DRIVE_ID.into(),
-        vendor: "Simulated".into(),
-        product: "虚拟光驱".into(),
-        media_present: true,
-        media_type: "DVD-R".into(),
-        media_id: "SIM.DISC".into(),
-        total_sectors: DEFAULT_TOTAL_SECTORS,
-        simulated: true,
-        write_speeds: vec![2, 4, 8, 16],
-        max_write_speed: 16,
-        ..Default::default()
-    }
 }
 
 impl SimDrive {
@@ -58,17 +40,13 @@ impl SimDrive {
             head_lba: 0,
             cached_block: None,
             rng: SplitMix64(seed),
-            pace_us: 0,
         }
     }
 
-    /// Disc that matches the shipped preset, so a demo run lands somewhere recognisable.
-    pub fn demo(paced: bool) -> Self {
-        let mut d = Self::new(reference_preset().spiral_params(), 0x5EED);
-        d.pace_us = if paced { 25 } else { 0 };
-        d
+    /// Disc that matches the shipped preset.
+    pub fn demo() -> Self {
+        Self::new(reference_preset().spiral_params(), 0x5EED)
     }
-
 }
 
 impl TimedDrive for SimDrive {
@@ -93,9 +71,6 @@ impl TimedDrive for SimDrive {
         self.now_ns = end.max(self.now_ns);
         self.head_lba = lba;
         self.cached_block = Some(block);
-        if self.pace_us > 0 {
-            std::thread::sleep(std::time::Duration::from_micros(self.pace_us));
-        }
         Ok(TimedRead { t_end_ns: end })
     }
 

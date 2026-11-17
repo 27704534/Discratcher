@@ -34,12 +34,13 @@ pub struct LadderShape {
 
 impl Media {
     /// The family a loaded disc belongs to, or None for one Discratcher cannot carve.
-    /// A closed CD-R answers as a CD-ROM (seen on the GUD1N straight after a burn), so
-    /// that name has to pass or a calibration disc could never be measured. Nothing is
-    /// burned on one: it is never blank.
+    /// A closed CD-R answers as a CD-ROM (seen on the GUD1N straight after a burn), and a
+    /// closed DVD-R as a DVD-ROM (a LITEON DH-16AFSH, #38), so those names have to pass or
+    /// a calibration disc could never be measured. Nothing is burned on one: it is never
+    /// blank.
     pub fn of_type(media_type: &str) -> Option<Self> {
         match media_type.trim() {
-            "DVD-R" | "DVD+R" | "DVD-RW" | "DVD+RW" => Some(Self::Dvd),
+            "DVD-R" | "DVD+R" | "DVD-RW" | "DVD+RW" | "DVD-ROM" => Some(Self::Dvd),
             "CD-R" | "CD-RW" | "CD-ROM" => Some(Self::Cd),
             _ => None,
         }
@@ -154,7 +155,8 @@ mod tests {
         assert_eq!(Media::of_type(" DVD-R "), Some(Media::Dvd));
         assert_eq!(Media::of_type("CD-R"), Some(Media::Cd));
         assert_eq!(Media::of_type("CD-ROM"), Some(Media::Cd));
-        for m in ["BD-R", "DVD+R DL", "DVD-RAM", "DVD-ROM", "None", ""] {
+        assert_eq!(Media::of_type("DVD-ROM"), Some(Media::Dvd));
+        for m in ["BD-R", "DVD+R DL", "DVD-RAM", "None", ""] {
             assert_eq!(Media::of_type(m), None, "{m}");
         }
     }

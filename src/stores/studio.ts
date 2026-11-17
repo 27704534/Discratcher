@@ -23,6 +23,8 @@ export interface CarveCommands {
 export const useStudio = defineStore('studio', () => {
   const view = ref<View>('home')
   const drives = ref<OpticalDriveInfo[]>([])
+  /** The system stopped answering about drives, so an empty list proves nothing. */
+  const driveStuck = ref(false)
   const presets = ref<DiscGeometryPreset[]>([])
   const driveKey = ref('')
   const presetId = ref('')
@@ -50,12 +52,9 @@ export const useStudio = defineStore('studio', () => {
     maxDarkDutyCycle: 0.65,
   })
 
-  // A disc whose MID names exactly one configuration needs no choosing. Not for the
-  // virtual drive: the list falls back to it whenever the real one drops out for a
-  // moment, as it does while a disc is swapped, and its preset then replaced the
-  // user's own just before a burn.
+  // A disc whose MID names exactly one configuration needs no choosing.
   watch(
-    () => (drive.value?.simulated ? '' : drive.value?.mediaId),
+    () => drive.value?.mediaId,
     (id) => {
       const hits = presets.value.filter((p) => p.mediaId === id)
       if (id && hits.length === 1) presetId.value = hits[0].id
@@ -66,7 +65,7 @@ export const useStudio = defineStore('studio', () => {
   // changes kind and exactly one calibration fits it, that one is selected.
   watch(
     // The calibrations may load after the drive is first seen.
-    [() => (drive.value?.mediaPresent && drive.value.supported && !drive.value.simulated ? isCd(drive.value) : null), () => presets.value.length] as const,
+    [() => (drive.value?.mediaPresent && drive.value.supported ? isCd(drive.value) : null), () => presets.value.length] as const,
     ([cd]) => {
       if (cd === null || (preset.value?.media === 'cd') === cd) return
       const fits = presets.value.filter((p) => (p.media === 'cd') === cd)
@@ -105,21 +104,18 @@ export const useStudio = defineStore('studio', () => {
     return d.id || `${d.vendor}/${d.product}`
   }
 
-  /** The virtual drive is selected only because no real one was listed. */
-  let stoodIn = false
   async function refreshDrives() {
-    drives.value = await call<OpticalDriveInfo[]>('list_optical_drives')
-    // A real drive's key changes with its disc, and the drive can drop out of the list
-    // for a moment while one is swapped. The virtual drive may stand in then, but only
-    // until a real one is back: left selected, it sent a calibration to nowhere.
-    const real = drives.value.find((d) => !d.simulated)
-    if (!drive.value && drives.value.length) {
-      driveKey.value = keyOf(real ?? drives.value[0])
-      stoodIn = !real
-    } else if (stoodIn && real) {
-      driveKey.value = keyOf(real)
-      stoodIn = false
+    try {
+      drives.value = await call<OpticalDriveInfo[]>('list_optical_drives')
+      driveStuck.value = false
+    } catch {
+      // The system stopped answering about drives: the drive may well be plugged in.
+      drives.value = []
+      driveStuck.value = true
     }
+    // A real drive's key changes with its disc, and the drive can drop out of the list
+    // for a moment while one is swapped.
+    if (!drive.value && drives.value.length) driveKey.value = keyOf(drives.value[0])
   }
 
   async function refreshPresets() {
@@ -147,5 +143,5 @@ export const useStudio = defineStore('studio', () => {
     }
   }
 
-  return { view, drives, presets, driveKey, presetId, drive, preset, config, error, job, carve, carveReady, canBack, origin, back, pendingCode, discPreview, discZoom, discPan, discRendered, codeFocus, keyOf, refreshDrives, refreshPresets, run }
+  return { view, drives, driveStuck, presets, driveKey, presetId, drive, preset, config, error, job, carve, carveReady, canBack, origin, back, pendingCode, discPreview, discZoom, discPan, discRendered, codeFocus, keyOf, refreshDrives, refreshPresets, run }
 })

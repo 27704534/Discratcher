@@ -488,6 +488,17 @@ pub fn drive_letter(id: &str) -> Option<String> {
     })
 }
 
+/// The shell's own Eject, the one the drive's context menu runs.
+pub fn eject(id: &str) -> Result<(), String> {
+    let letter = drive_letter(id).ok_or_else(|| "找不到这个光驱的盘符".to_string())?;
+    let script = format!("(New-Object -ComObject Shell.Application).Namespace(17).ParseName('{letter}').InvokeVerb('Eject')");
+    match Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &script]).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("光驱没有弹出，可能有别的程序正在使用这张光盘".into()),
+        Err(e) => Err(format!("PowerShell 运行不了：{e}")),
+    }
+}
+
 /// The identity behind a device name: same drive, same triple, however it was opened.
 fn device_number(id: &str) -> Option<StorageDeviceNumber> {
     let d = open_handle(id, 0).ok()?;

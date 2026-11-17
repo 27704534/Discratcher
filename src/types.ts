@@ -1,8 +1,10 @@
 export interface OpticalDriveInfo {
   id: string; vendor: string; product: string; revision: string
   mediaPresent: boolean; mediaType: string; mediaId: string
-  totalSectors: number; isBlank: boolean; simulated: boolean
+  totalSectors: number; isBlank: boolean
   writeSpeeds?: number[]; maxWriteSpeed?: number; supported?: boolean
+  /** A written rewritable disc the burner erases before writing, so it can be used again. */
+  reusable?: boolean
 }
 export type DiscKind = 'none' | 'unsupported' | 'blank' | 'calibration' | 'other'
 export interface DiscCheck { sectors: number; foreign: boolean }

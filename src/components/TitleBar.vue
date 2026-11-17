@@ -70,7 +70,7 @@
 </template>
 
 <script setup lang="ts">
-import { mdiUpdate, mdiArrowLeft, mdiCheck, mdiClose, mdiContentSaveOutline, mdiImagePlusOutline, mdiTranslate, mdiCrosshairsGps, mdiExportVariant, mdiFire, mdiFolderOpenOutline, mdiGithub, mdiHomeOutline, mdiImageEditOutline, mdiMagnify, mdiMessageAlertOutline, mdiTrashCanOutline, mdiWindowMaximize, mdiWindowMinimize, mdiWindowRestore } from '@mdi/js'
+import { mdiUpdate, mdiArrowLeft, mdiCheck, mdiClose, mdiContentSaveOutline, mdiImagePlusOutline, mdiTranslate, mdiCrosshairsGps, mdiEject, mdiExportVariant, mdiFire, mdiFolderOpenOutline, mdiGithub, mdiHomeOutline, mdiImageEditOutline, mdiMagnify, mdiMessageAlertOutline, mdiTrashCanOutline, mdiWindowMaximize, mdiWindowMinimize, mdiWindowRestore } from '@mdi/js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { call, isWindowMaximized, openInBrowser, windowControl } from '../api'
 import { labelOf, REPOSITORY_URL } from '../catalog'
@@ -119,6 +119,18 @@ async function removePreset() {
     if (s.presetId === id) s.presetId = ''
     await s.refreshPresets()
     notifySuccess(t('presets.deleted'))
+  } catch (e) {
+    notifyError(String(e))
+  }
+}
+
+/** Opens the tray even when a timed read left the disc unmounted and the button does nothing. */
+async function eject() {
+  const d = s.drive
+  if (!d) return
+  try {
+    await call('eject_disc', { driveId: d.id })
+    await s.refreshDrives()
   } catch (e) {
     notifyError(String(e))
   }
@@ -187,6 +199,7 @@ const menus = computed<Menu[]>(() => [
       { key: 'calibrate', title: t('menu.calibrate'), icon: mdiCrosshairsGps, run: () => (s.view = 'calibrate') },
       { key: 'd1', divider: true },
       { key: 'burn', title: t('menu.burn'), icon: mdiFire, disabled: !s.carveReady, run: () => s.carve?.burn() },
+      { key: 'eject', title: t('menu.eject'), icon: mdiEject, disabled: !s.drive?.mediaPresent || !!s.job, run: eject },
     ],
   },
   {

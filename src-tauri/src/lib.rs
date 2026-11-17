@@ -13,13 +13,15 @@ use disc_core::preset::DiscGeometryPreset;
 use disc_core::preview::{self, PreviewInput};
 use disc_core::spiral::Spiral;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Default)]
 struct Studio {
     cancel: Arc<AtomicBool>,
+    /// Jobs holding a drive exclusively. Quitting waits for them to let go.
+    holding: Arc<AtomicUsize>,
     /// Pictures decoded for the fallback preview, by path.
     pictures: Mutex<std::collections::HashMap<String, Arc<Picture>>>,
 }
@@ -70,14 +72,7 @@ fn write_calibration_log(app: &AppHandle, log: &[serde_json::Value]) -> Result<(
     write_atomic(&data_file(app, "calibrations.json")?, &text)
 }
 
-/// Newest first. The shape belongs to the page that writes it; this only keeps it safe.
-#[tauri::command]
-fn get_calibration_log(app: AppHandle) -> Result<Vec<serde_json::Value>, String> {
-    let mut log = calibration_log(&app)?;
-    log.reverse();
-    Ok(log)
-}
-
+/// One calibration attempt, kept whatever its outcome; the rung timings can refit the ETA model.
 #[tauri::command]
 fn add_calibration_record(app: AppHandle, record: serde_json::Value) -> Result<(), String> {
     let mut log = calibration_log(&app)?;
@@ -85,18 +80,19 @@ fn add_calibration_record(app: AppHandle, record: serde_json::Value) -> Result<(
     write_calibration_log(&app, &log)
 }
 
-#[tauri::command]
-fn delete_calibration_record(app: AppHandle, id: String) -> Result<(), String> {
-    let mut log = calibration_log(&app)?;
-    log.retain(|r| r["id"].as_str() != Some(id.as_str()));
-    write_calibration_log(&app, &log)
-}
-
 /// Probing a drive costs tens of milliseconds, and the page asks every three
 /// seconds, so it runs on a blocking thread rather than the UI one.
 #[tauri::command]
-async fn list_optical_drives() -> Vec<OpticalDriveInfo> {
-    blocking(|| Ok(drive::list_drives())).await.unwrap_or_default()
+async fn list_optical_drives() -> Result<Vec<OpticalDriveInfo>, String> {
+    blocking(|| {
+        let drives = drive::list_drives();
+        // An empty list from a service that stopped answering is not "no drive".
+        if drives.is_empty() && drive::stuck() {
+            return Err("stuck".into());
+        }
+        Ok(drives)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -138,6 +134,52 @@ fn cancel_job(state: State<Studio>) {
 fn fresh_cancel(state: &State<Studio>) -> Arc<AtomicBool> {
     state.cancel.store(false, Ordering::Relaxed);
     state.cancel.clone()
+}
+
+/// Counts a job as holding the drive for as long as it lives. Declared before the drive, so
+/// it is dropped after it: the count falls only once the drive is released and remounted.
+struct Holding(Arc<AtomicUsize>);
+
+impl Holding {
+    fn new(state: &State<Studio>) -> Self {
+        state.holding.fetch_add(1, Ordering::SeqCst);
+        Self(state.holding.clone())
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How long quitting waits for a job to release the drive. A timed read gives up after 30 s,
+/// but the ladder checks for cancel between reads, which take milliseconds.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Quitting while a job holds the drive would leave the drive held and the disc unmounted:
+/// the tray then will not open until the drive is replugged. So the job is cancelled, the
+/// window goes away at once, and the app exits once the drive is let go.
+fn release_then_exit(app: &AppHandle) -> bool {
+    let state = app.state::<Studio>();
+    if state.holding.load(Ordering::SeqCst) == 0 {
+        return false;
+    }
+    state.cancel.store(true, Ordering::Relaxed);
+    for w in app.webview_windows().values() {
+        let _ = w.hide();
+    }
+    let (app, holding) = (app.clone(), state.holding.clone());
+    std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        while holding.load(Ordering::SeqCst) > 0 && began.elapsed() < RELEASE_WAIT {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Counted as released from here on, so the exit this asks for goes through.
+        holding.store(0, Ordering::SeqCst);
+        app.exit(0);
+    });
+    true
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
@@ -198,9 +240,11 @@ async fn start_calibration(
     range_pct: (f64, f64),
 ) -> Result<CalibrationResult, String> {
     let cancel = fresh_cancel(&state);
+    let held = Holding::new(&state);
     blocking(move || {
+        let _held = held;
         let media = media_of(&media_type)?;
-        let mut d = drive::open_timed(&drive_id, true)?;
+        let mut d = drive::open_timed(&drive_id)?;
         let image_sectors = if media == Media::Cd { disc_check::calibration_sectors(d.as_mut()) } else { None };
         let cfg = LadderConfig { max_targets, reps, range_pct, media, image_sectors, ..Default::default() };
         let a = app.clone();
@@ -219,6 +263,12 @@ async fn start_calibration(
     .await
 }
 
+/// Opens the tray. Writes nothing.
+#[tauri::command]
+async fn eject_disc(drive_id: String) -> Result<(), String> {
+    blocking(move || drive::eject(&drive_id)).await
+}
+
 /// What the drive holds, for deciding whether calibrating starts with a burn.
 #[tauri::command]
 async fn inspect_disc(drive_id: String) -> Result<DiscKind, String> {
@@ -229,9 +279,11 @@ async fn inspect_disc(drive_id: String) -> Result<DiscKind, String> {
 #[tauri::command]
 async fn check_calibration_disc(app: AppHandle, state: State<'_, Studio>, drive_id: String, media_type: String) -> Result<DiscCheck, String> {
     let cancel = fresh_cancel(&state);
+    let held = Holding::new(&state);
     blocking(move || {
+        let _held = held;
         let media = media_of(&media_type)?;
-        let mut d = drive::open_timed(&drive_id, false)?;
+        let mut d = drive::open_timed(&drive_id)?;
         disc_check::check_calibration_disc(d.as_mut(), media, &cancel, &mut |p| {
             let _ = app.emit("calib://check", p);
         })
@@ -362,12 +414,6 @@ async fn burn_iso_to_drive(
 ) -> Result<(), String> {
     let cancel = fresh_cancel(&state);
     blocking(move || {
-        if drive_id.starts_with("sim://") {
-            // Nothing here touches a disc or a drive: it only plays the progress.
-            return burner::burn_simulated(std::time::Duration::from_millis(60), &cancel, &mut |p| {
-                let _ = app.emit("burn://progress", p);
-            });
-        }
         disc_core::drive::check_burnable(&drive_id, &iso_path)?;
         // Windows burns inside the app: IMAPI2 is called straight from Rust, so progress
         // arrives from the drive and no window or helper process is involved.
@@ -384,7 +430,14 @@ async fn burn_iso_to_drive(
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let argv = burner::burn_command(&drive_id, &iso_path, speed, verify)?;
+            // A rewritable disc is erased by the burner itself, as part of this same burn:
+            // a written one has no other way to be written again, and a fresh one is
+            // formatted by the same step. Nothing here erases anything on its own: the
+            // user pressed the burn button.
+            let erase = disc_core::drive::list_drives()
+                .into_iter()
+                .any(|d| d.id == drive_id && disc_core::drive::needs_erase(&d.media_type));
+            let argv = burner::burn_command(&drive_id, &iso_path, speed, verify, erase)?;
             burner::burn(&argv, &cancel, &mut |p| {
                 let _ = app.emit("burn://progress", p);
             })
@@ -407,13 +460,12 @@ pub fn run() {
             save_preset,
             delete_preset,
             export_preset,
-            get_calibration_log,
             add_calibration_record,
-            delete_calibration_record,
             cancel_job,
             generate_calibration_iso,
             start_calibration,
             inspect_disc,
+            eject_disc,
             check_calibration_disc,
             analyze_artwork,
             simulate_disc_preview,
@@ -426,6 +478,20 @@ pub fn run() {
             cache_iso_path,
             remove_cached_iso,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|w, e| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                if release_then_exit(w.app_handle()) {
+                    api.prevent_close();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, e| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = e {
+                if release_then_exit(app) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }

@@ -133,12 +133,12 @@ async function rate(score: number) {
 const eta = useEta({ running: () => p.status === 'running', step: () => p.stepIndex, percent: () => p.percent, stepSeconds: p.stepSeconds, laterSeconds: p.laterSeconds })
 const minutes = computed(() => Math.ceil(p.totalSeconds / 60))
 
-const usable = computed(() => !!s.drive?.mediaPresent && !!s.drive.supported && (s.drive.isBlank || s.drive.simulated) && speedOptions.value.length > 0)
+const usable = computed(() => !!s.drive?.mediaPresent && !!s.drive.supported && (s.drive.isBlank || s.drive.reusable) && speedOptions.value.length > 0)
 const warning = computed(() => {
   if (!s.drive) return t('burn.warnNoDrive')
-  if (s.drive.simulated) return t('burn.warnSim')
   if (!s.drive.mediaPresent) return t('burn.warnNoDisc')
   if (!s.drive.supported) return t('drive.unsupported', { type: s.drive.mediaType })
+  if (s.drive.reusable) return t('burn.warnErase')
   if (!s.drive.isBlank) return t('burn.warnNotBlank')
   if (!speedOptions.value.length) return t('burn.warnNoSpeed')
   return ''
@@ -153,6 +153,9 @@ const speedOptions = computed(() => {
   } else if (d.maxWriteSpeed && d.maxWriteSpeed > 0) {
     const candidates = isCd(d) ? [4, 8, 10, 16, 24, 32, 40, 48] : [2, 4, 6, 8, 12, 16]
     speeds = candidates.filter((x) => x <= d.maxWriteSpeed!)
+  } else if (d.reusable) {
+    // Erased discs are only offered the safe end, as the native side does.
+    speeds = isCd(d) ? [4] : [2, 4]
   } else if (d.isBlank) {
     speeds = [2, 4, 8, 16]
   }

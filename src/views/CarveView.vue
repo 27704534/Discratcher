@@ -413,7 +413,7 @@ async function compose(path: string, ctx?: StepContext) {
 /** A DVD calibration on a CD, or the other way round, can only fail: say so before composing. */
 function checkFamily() {
   const d = s.drive
-  if (!d?.mediaPresent || !d.supported || d.simulated) return
+  if (!d?.mediaPresent || !d.supported) return
   const [disc, preset] = [isCd(d) ? 'CD' : 'DVD', s.preset?.media === 'cd' ? 'CD' : 'DVD']
   if (disc !== preset) throw t('carve.familyMismatch', { disc, preset })
 }

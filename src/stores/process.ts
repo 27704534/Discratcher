@@ -171,8 +171,6 @@ export const useProcess = defineStore('process', () => {
   async function start() {
     const req = request.value!
     let wrote = false
-    // The virtual drive plays a burn without writing, so it proves nothing about the parameters.
-    const real = !s.drive?.simulated
     status.value = 'running'
     stopping.value = false
     const ok = await s.run(req.title, async () => {
@@ -202,7 +200,7 @@ export const useProcess = defineStore('process', () => {
       if (req.revealStep != null) written.value = 1
       message.value = req.doneMessage ?? t('process.finished')
       if (req.autoClose || s.view !== 'process') close()
-      burned.value = wrote && real
+      burned.value = wrote
       if (burned.value) req.onBurned?.()
       req.onDone?.()
     } else if (stopping.value && !wrote) {

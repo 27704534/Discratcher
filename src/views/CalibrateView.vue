@@ -1,15 +1,12 @@
 <template>
   <div class="page page-flow">
     <div class="flow">
-      <h1>{{ t('cal.title') }}</h1>
-      <p class="small muted">{{ t('cal.tip') }} <a role="button" tabindex="0" @click="s.view = 'models'" @keydown.enter="s.view = 'models'">{{ t('cal.goSearch') }}</a></p>
-      <p class="small muted">{{ s.pendingCode ? t('cal.forCode', { code: s.pendingCode }) : t('cal.forUnlisted') }} {{ t('cal.times', { n: minutes, b: cd ? 8 : 15 }) }}</p>
-      <DrivePicker />
+      <h1>{{ s.pendingCode ? t('cal.titleFor', { code: s.pendingCode }) : t('cal.title') }}</h1>
+      <DrivePicker bare />
       <div class="step">
-        <span class="grow small">{{ t(!hasDisc ? 'cal.hintNoDisc' : blank ? 'cal.hintBlank' : 'cal.hintWritten') }}</span>
-        <UiButton variant="solid" :disabled="!hasDisc || !!s.job" @click="begin">{{ t('cal.start') }}</UiButton>
+        <span class="grow">{{ line }}</span>
+        <UiButton variant="solid" :disabled="!ready || !!s.job" @click="begin">{{ t('cal.start') }}</UiButton>
       </div>
-      <div class="small muted">{{ t('cal.autosave') }}</div>
       <div v-if="isMock" class="dev row small">
         <span class="grow muted">{{ t('cal.devNote') }}</span>
         <UiButton variant="ghost" @click="simulate">{{ t('cal.devRun') }}</UiButton>
@@ -21,73 +18,25 @@
         <UiSlider v-model="hi" :label="t('cal.hi')" :min="80" :max="98" :step="1" :format="(v) => `${v}%`" />
       </UiAdvanced>
 
-      <section class="records">
-        <div class="title">{{ t('cal.records') }}</div>
-        <div v-if="!log.length" class="small muted">{{ t('cal.noRecords') }}</div>
-        <div class="list">
-          <div v-for="r in log" :key="r.id" class="record" :class="{ open: openId === r.id }">
-            <button type="button" class="summary" :aria-expanded="openId === r.id" @click="openId = openId === r.id ? '' : r.id">
-              <UiIcon :class="state(r)" :path="stateIcon[state(r)]" />
-              <span class="grow text">
-                <span class="ellipsis">{{ r.stamperCode || r.mediaId || t('cal.unknownDisc') }}</span>
-                <span class="small muted ellipsis">{{ when(r.startedAt) }} · {{ stateLabel[state(r)] }}</span>
-              </span>
-              <span class="mono muted">{{ r.rmsDeg != null ? `${r.rmsDeg.toFixed(3)}°` : '—' }}</span>
-            </button>
-            <div v-if="openId === r.id" class="detail">
-              <dl>
-                <div><dt>{{ t('cal.disc') }}</dt><dd>{{ r.mediaId || '—' }}</dd></div>
-                <div><dt>{{ t('cal.drive') }}</dt><dd>{{ r.driveModel || '—' }}</dd></div>
-                <div><dt>{{ t('cal.rungsDone') }}</dt><dd class="mono">{{ r.rungsMeasured }} / {{ r.rungs }}</dd></div>
-                <div><dt>{{ t('cal.readsPer') }}</dt><dd class="mono">{{ t('cal.readsUnit', { n: r.reads }) }}</dd></div>
-                <div><dt>{{ t('cal.range') }}</dt><dd class="mono">{{ r.rangePct.map((v) => `${Math.round(v * 100)}%`).join('–') }}</dd></div>
-                <div><dt>{{ t('cal.took') }}</dt><dd class="mono">{{ duration(r.durationSeconds) }}</dd></div>
-                <div v-if="r.preset"><dt>{{ t('cal.innerRadius') }}</dt><dd class="mono">{{ r.preset.innerRadiusMm.toFixed(6) }} mm</dd></div>
-                <div v-if="r.preset"><dt>{{ t('cal.pitch') }}</dt><dd class="mono">{{ r.preset.basePitchUm.toFixed(6) }} µm</dd></div>
-              </dl>
-              <p v-if="r.message" class="small muted selectable">{{ r.message }}</p>
-              <div class="row">
-                <UiButton v-if="r.status === 'success' && r.preset" :disabled="!usable(r)" @click="useRecord(r)">{{ t('cal.useCarve') }}</UiButton>
-                <UiButton v-if="sharedAs(r)" variant="ghost" @click="viewContribution(r)">{{ t('cal.viewShared') }}</UiButton>
-                <UiButton v-else-if="r.status === 'success' && r.preset" variant="ghost" :disabled="!burned(r)" :data-tooltip="burned(r) ? undefined : t('cal.shareTip')" @click="share(r)">{{ t('cal.share') }}</UiButton>
-                <UiButton variant="ghost" @click="deleteId = r.id">{{ t('common.delete') }}</UiButton>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
     </div>
 
-    <ContributeDialog v-if="shareTarget" :preset="shareTarget" @close="shareTarget = null" />
-    <UiDialog v-if="deleteId" :title="t('cal.deleteTitle')" @close="deleteId = ''">
-      <p>{{ t('cal.deleteBody') }}</p>
-      <template #actions>
-        <UiButton variant="ghost" @click="deleteId = ''">{{ t('common.cancel') }}</UiButton>
-        <UiButton variant="danger" @click="removeRecord">{{ t('common.delete') }}</UiButton>
-      </template>
-    </UiDialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { mdiAlertOutline, mdiCheckCircleOutline, mdiCloseCircleOutline, mdiInformationOutline, mdiMinusCircleOutline } from '@mdi/js'
-import { computed, onMounted, ref, shallowRef, watch } from 'vue'
-import { call, CANCELLED, isMock, loadIndex, mockDev, on, openInBrowser } from '../api'
-import { issueUrl, normalizeCode, type CatalogEntry } from '../catalog'
+import { computed, onMounted, ref, watch } from 'vue'
+import { call, CANCELLED, isMock, mockDev, on } from '../api'
 import { calibrationSeconds, CalibrationPlan, CD_MEASURE_FACTOR, isCd, REFERENCE_SHARE } from '../etaModel'
 import { twistOf } from '../twist'
 import { t } from '../i18n'
-import ContributeDialog from '../components/ContributeDialog.vue'
-import UiDialog from '../components/UiDialog.vue'
 import DrivePicker from '../components/DrivePicker.vue'
 import UiAdvanced from '../components/UiAdvanced.vue'
 import UiButton from '../components/UiButton.vue'
-import UiIcon from '../components/UiIcon.vue'
 import UiSlider from '../components/UiSlider.vue'
 import { notifyError, notifySuccess, notifyWarning } from '../notices'
 import { useProcess, type ProcessStep, type StepContext } from '../stores/process'
 import { useStudio } from '../stores/studio'
-import type { CalibRungEvent, CalibrationRecord, CalibrationResult, CalibrationRungRecord, CalibrationStatus, DiscCheck, DiscGeometryPreset, DiscKind } from '../types'
+import type { CalibRungEvent, CalibrationRecord, CalibrationResult, CalibrationRungRecord, DiscCheck, DiscGeometryPreset, DiscKind } from '../types'
 
 /** Every DVD calibration image is DVD sized, whatever the drive said a moment ago (issue #8). */
 const DVD_SECTORS = 2295104
@@ -101,71 +50,10 @@ const rungs = ref(56)
 const reads = ref(40)
 const lo = ref(2)
 const hi = ref(96)
-/** The calibration being shared; sharing opens only for one that has really been burned. */
-const shareTarget = ref<DiscGeometryPreset | null>(null)
-const deleteId = ref('')
-const log = shallowRef<CalibrationRecord[]>([])
-const openId = ref('')
-/** A successful calibration is told apart by how far it has been taken: measured, burned, shared. */
-type LogState = Exclude<CalibrationStatus, 'success'> | 'unverified' | 'tested' | 'contributed'
-const stateLabel = computed<Record<LogState, string>>(() => ({ unverified: t('cal.state.unverified'), tested: t('cal.state.tested'), contributed: t('cal.state.contributed'), suspect: t('cal.state.suspect'), failed: t('cal.state.failed'), cancelled: t('cal.state.cancelled') }))
-const stateIcon: Record<LogState, string> = { unverified: mdiAlertOutline, tested: mdiInformationOutline, contributed: mdiCheckCircleOutline, suspect: mdiAlertOutline, failed: mdiCloseCircleOutline, cancelled: mdiMinusCircleOutline }
-/** The library index; stays empty when it is unreachable. */
-const shared = shallowRef<CatalogEntry[]>([])
-/** A calibration of ours that is already in the library: same printed code and same measured pitch. */
-const sharedAs = (r: CalibrationRecord) =>
-  r.preset ? shared.value.find((e) => normalizeCode(e.stamperCode) === normalizeCode(r.preset!.stamperCode) && e.basePitchUm === r.preset!.basePitchUm) : undefined
-
-function state(r: CalibrationRecord): LogState {
-  if (r.status !== 'success') return r.status
-  const mine = r.preset && s.presets.find((p) => p.id === r.preset!.id)
-  if (sharedAs(r)) return 'contributed'
-  return mine?.burnedAt ? 'tested' : 'unverified'
-}
-const when = (iso: string) => new Date(iso).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-const duration = (s: number) => (s >= 60 ? t('time.minSec', { m: Math.floor(s / 60), s: Math.round(s % 60) }) : t('time.sec', { s: Math.round(s) }))
-const usable = (r: CalibrationRecord) => s.presets.some((p) => p.id === r.preset?.id)
-
-function useRecord(r: CalibrationRecord) {
-  s.presetId = r.preset!.id
-  s.view = 'carve'
-}
-
-const current = (r: CalibrationRecord) => s.presets.find((p) => p.id === r.preset?.id)
-const burned = (r: CalibrationRecord) => !!current(r)?.burnedAt
-
-function viewContribution(r: CalibrationRecord) {
-  openInBrowser(issueUrl(sharedAs(r)!)).catch((e) => notifyError(String(e)))
-}
-
-function share(r: CalibrationRecord) {
-  shareTarget.value = current(r) ?? null
-}
-
-async function removeRecord() {
-  const id = deleteId.value
-  deleteId.value = ''
-  try {
-    await call('delete_calibration_record', { id })
-    await loadLog()
-  } catch (e) {
-    notifyError(String(e))
-  }
-}
-
-async function loadLog() {
-  try {
-    log.value = await call<CalibrationRecord[]>('get_calibration_log')
-  } catch (e) {
-    notifyError(String(e))
-  }
-}
-
 async function record(entry: Omit<CalibrationRecord, 'id' | 'durationSeconds' | 'startedAt' | 'rungsMeasured' | 'points' | 'rungs' | 'reads' | 'rangePct'>, began: Date) {
-  const entryId = `calibration-${began.getTime()}`
   const full: CalibrationRecord = {
     ...entry,
-    id: entryId,
+    id: `calibration-${began.getTime()}`,
     startedAt: began.toISOString(),
     durationSeconds: (Date.now() - began.getTime()) / 1000,
     rungs: rungs.value,
@@ -176,8 +64,6 @@ async function record(entry: Omit<CalibrationRecord, 'id' | 'durationSeconds' | 
   }
   try {
     await call('add_calibration_record', { record: full })
-    await loadLog()
-    openId.value = entryId
   } catch (e) {
     notifyError(t('cal.logFail', { e: String(e) }))
   }
@@ -188,9 +74,38 @@ let referenceLba = 0
 let points: CalibrationRungRecord[] = []
 let rungClock = 0
 
-// A Blu-ray disc counts as no disc: neither burning nor measuring means anything on it.
-const hasDisc = computed(() => !!s.drive?.mediaPresent && !!s.drive.supported)
-const blank = computed(() => hasDisc.value && !!s.drive?.isBlank)
+/** What the disc is, found out before the button is pressed. `unknown` when the read failed: pressing the button says why. */
+const kind = ref<DiscKind | 'checking' | 'unknown'>('none')
+watch(
+  () => (s.drive ? [s.keyOf(s.drive), s.drive.mediaPresent, s.drive.supported, s.drive.isBlank, s.drive.reusable].join() : ''),
+  async (key, _, stale) => {
+    const d = s.drive
+    // The listing settles everything but a written disc, so only that one is read.
+    if (!d?.mediaPresent) return (kind.value = 'none')
+    if (!d.supported) return (kind.value = 'unsupported')
+    if (d.isBlank || d.reusable) return (kind.value = 'blank')
+    let current = true
+    stale(() => (current = false))
+    kind.value = 'checking'
+    const found = await call<DiscKind>('inspect_disc', { driveId: d.id }).catch(() => 'unknown' as const)
+    if (current) kind.value = found
+  },
+  { immediate: true },
+)
+const ready = computed(() => kind.value === 'blank' || kind.value === 'calibration' || kind.value === 'unknown')
+const line = computed(() => {
+  const d = s.drive
+  if (!d) return t(s.driveStuck ? 'drive.stuck' : 'drive.none')
+  switch (kind.value) {
+    case 'checking': return t('cal.checking')
+    case 'none': return t('cal.hintNoDisc')
+    case 'unsupported': return t('drive.unsupported', { type: d.mediaType })
+    case 'blank': return t(d.isBlank ? 'cal.willBurn' : 'cal.willErase', { type: d.mediaType, n: minutes.value + (cd.value ? 8 : 15) })
+    case 'calibration': return t('cal.willMeasure', { n: minutes.value })
+    case 'other': return t('cal.notCalDisc')
+    default: return t('drive.written')
+  }
+})
 const cd = computed(() => isCd(s.drive))
 /** Held from the last time the drive showed its disc: it lists none for a moment after each session. */
 const mediaType = ref('DVD-R')
@@ -249,7 +164,9 @@ async function begin() {
     notifyError(String(e))
     return
   }
-  if (kind === 'blank') {
+  // A used rewritable disc is erased by the burn itself, so it needs a calibration image
+  // just as a blank one does.
+  if (kind === 'blank' || (kind === 'other' && d.reusable)) {
     p.openBurn({
       title: t('cal.title'),
       note: t('cal.burnNote'),
@@ -331,36 +248,11 @@ onMounted(() => {
   })
   on<string>('calib://status', (m) => ctx?.report(null, m))
   on<number>('calib://check', (percent) => checkCtx?.report(percent))
-  loadLog()
-  refreshShared()
 })
 
-/** The index is small and already held for searching, so asking it what has been contributed is free. */
-function refreshShared() {
-  loadIndex().then((all) => (shared.value = all)).catch(() => {})
-}
-// A contribution lands on GitHub after the form closes, so look again whenever the page is shown.
-watch(() => s.view, (v) => v === 'calibrate' && refreshShared())
 </script>
 
 <style scoped>
-.records { display: flex; flex-direction: column; gap: var(--oc-space-sm); padding-top: var(--oc-space-md); border-top: 1px solid var(--oc-border-muted); }
-a { color: var(--oc-fg-accent); cursor: pointer; }
-.list { display: flex; flex-direction: column; gap: 2px; }
-.record { border-radius: var(--oc-radius-control); background: var(--oc-bg-glass); backdrop-filter: blur(18px); }
-.summary { width: 100%; display: flex; align-items: center; gap: var(--oc-space-sm); padding: var(--oc-space-xs) var(--oc-space-sm); border: 0; border-radius: var(--oc-radius-control); background: transparent; text-align: left; }
-.summary:hover { background-color: var(--oc-bg-hover); }
-.summary svg { flex: none; }
-.text { display: flex; flex-direction: column; min-width: 0; }
-.contributed { color: var(--oc-fg-success); }
-.tested { color: var(--oc-fg-accent); }
-.unverified, .suspect { color: var(--oc-fg-warning); }
-.failed { color: var(--oc-fg-danger); }
-.cancelled { color: var(--oc-fg-muted); }
-.detail { display: flex; flex-direction: column; gap: var(--oc-space-sm); padding: var(--oc-space-2xs) var(--oc-space-sm) var(--oc-space-sm) 32px; }
-dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--oc-space-xs) var(--oc-space-md); margin: 0; }
-dt { color: var(--oc-fg-muted); font-size: var(--oc-text-xs); }
-dd { margin: 0; overflow-wrap: anywhere; }
 .step { display: flex; align-items: center; gap: var(--oc-space-sm); }
 .dev { padding-top: var(--oc-space-sm); border-top: 1px dashed var(--oc-border-muted); }
 </style>

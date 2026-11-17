@@ -105,6 +105,14 @@ pub fn open(id: &str) -> Result<Box<dyn TimedDrive>, String> {
     Ok(Box::new(LinuxDrive { file, epoch: Instant::now() }))
 }
 
+pub fn eject(id: &str) -> Result<(), String> {
+    match std::process::Command::new("eject").arg(id).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("光驱没有弹出，可能有别的程序正在使用这张光盘".into()),
+        Err(e) => Err(format!("eject 运行不了：{e}")),
+    }
+}
+
 pub fn list() -> Vec<OpticalDriveInfo> {
     let Ok(dir) = std::fs::read_dir("/sys/class/block") else { return Vec::new() };
     dir.flatten()

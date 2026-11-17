@@ -2,7 +2,7 @@
 //! disc holds what was written, and whether a measured geometry is a DVD at all.
 //! Everything here only reads.
 
-use crate::drive::{list_drives, open_timed, TimedDrive};
+use crate::drive::{list_drives, open_reader, open_timed, TimedDrive};
 use crate::ecma267::DEFAULT_TOTAL_SECTORS;
 use crate::media::Media;
 use crate::iso9660::{calibration_sector, CALIBRATION_VOLUME, FS_LAST_LBA};
@@ -39,7 +39,14 @@ pub fn inspect(id: &str) -> Result<DiscKind, String> {
     if d.is_blank {
         return Ok(DiscKind::Blank);
     }
-    let mut drive = open_timed(id, false)?;
+    // A DVD's raw node counts in the 2048-byte sectors this reader addresses, so one can
+    // be read without taking it off the desktop. A CD's counts in 2352, so a CD goes
+    // through the timing path, which was written for its layout.
+    let mut drive = if Media::of_type(&d.media_type) == Some(Media::Dvd) {
+        open_reader(id)?
+    } else {
+        open_timed(id)?
+    };
     Ok(match volume(drive.as_mut()) {
         Some((label, _)) if label == CALIBRATION_VOLUME => DiscKind::Calibration,
         _ => DiscKind::Other,
@@ -217,7 +224,7 @@ mod tests {
 
     #[test]
     fn a_freshly_burned_disc_passes() {
-        let mut d = SimDrive::demo(false);
+        let mut d = SimDrive::demo();
         let mut seen = 0.0;
         let c = check_calibration_disc(&mut d, Media::Dvd, &AtomicBool::new(false), &mut |p| seen = p).unwrap();
         assert_eq!(c.sectors, DEFAULT_TOTAL_SECTORS);
@@ -266,7 +273,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_stretch_names_where_it_is() {
-        let mut d = Unfinished(SimDrive::demo(false), DEFAULT_TOTAL_SECTORS / 2);
+        let mut d = Unfinished(SimDrive::demo(), DEFAULT_TOTAL_SECTORS / 2);
         let e = check_calibration_disc(&mut d, Media::Dvd, &AtomicBool::new(false), &mut |_| {}).unwrap_err();
         assert!(e.contains("读不出来"), "{e}");
     }
