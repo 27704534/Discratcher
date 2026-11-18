@@ -50,6 +50,12 @@ const READ_DISC_INFORMATION: [u8; 10] = [0x51, 0, 0, 0, 0, 0, 0, 0, 34, 0];
 /// READ DISC STRUCTURE answers with a structure a couple of kilobytes long; the
 /// maker and the media code sit well past the header.
 const DISC_STRUCTURE_BYTES: usize = 4096;
+/// Some USB bridges never answer this command at all (measured on a GUD1N over
+/// USB). The drive list is polled every three seconds and the full probe runs
+/// whenever the medium changed, so a bridge that swallows the command must not
+/// hold the list for as long as the general timeout lasts. A few seconds is
+/// enough for a drive that answers at all: the disc is awake by then.
+const DISC_STRUCTURE_TIMEOUT_S: u32 = 5;
 
 /// STORAGE_DEVICE_NUMBER, filled in by IOCTL_STORAGE_GET_DEVICE_NUMBER.
 #[repr(C)]
@@ -193,10 +199,21 @@ impl WinDrive {
         Ok(())
     }
 
-    fn exec(&mut self, cdb: &[u8], mut data: Option<&mut [u8]>) -> Result<(), Failure> {
-        let first = self.exec_once(cdb, data.as_deref_mut(), TIMEOUT_S);
+    fn exec(&mut self, cdb: &[u8], data: Option<&mut [u8]>) -> Result<(), Failure> {
+        self.exec_with_timeout(cdb, data, TIMEOUT_S)
+    }
+
+    /// The same, with a timeout of its own: a command that some bridges never
+    /// answer must not hold the drive list for as long as the general timeout.
+    fn exec_with_timeout(
+        &mut self,
+        cdb: &[u8],
+        mut data: Option<&mut [u8]>,
+        timeout_s: u32,
+    ) -> Result<(), Failure> {
+        let first = self.exec_once(cdb, data.as_deref_mut(), timeout_s);
         match &first {
-            Err(f) if f.retryable() => self.exec_once(cdb, data.as_deref_mut(), TIMEOUT_S),
+            Err(f) if f.retryable() => self.exec_once(cdb, data.as_deref_mut(), timeout_s),
             _ => first,
         }
     }
@@ -281,10 +298,22 @@ impl WinDrive {
     /// for itself. It is the one number that says which disc this is, so a
     /// calibration can be looked up by the disc in the drive instead of by hand.
     /// A drive that will not answer leaves the code empty.
-    fn media_id(&mut self) -> Option<String> {
+    ///
+    /// A DVD-R keeps its code in a table of records and a DVD+R in ADIP, and the
+    /// kind of disc in the drive says which of the two shapes to expect.
+    fn media_id(&mut self, media_type: &str) -> Option<String> {
         let mut b = vec![0u8; DISC_STRUCTURE_BYTES];
-        self.exec(&mmc::read_disc_structure(0x00, DISC_STRUCTURE_BYTES as u16), Some(&mut b[..])).ok()?;
-        mmc::parse_medium_id(&b)
+        self.exec_with_timeout(
+            &mmc::read_disc_structure(0x00, DISC_STRUCTURE_BYTES as u16),
+            Some(&mut b[..]),
+            DISC_STRUCTURE_TIMEOUT_S,
+        )
+        .ok()?;
+        if media_type.starts_with("DVD+") {
+            mmc::parse_adip_id(&b)
+        } else {
+            mmc::parse_medium_id(&b)
+        }
     }
 
     /// Everything the rest of the app expects, from as few commands as will answer.
@@ -314,10 +343,12 @@ impl WinDrive {
         let reported = self.read_capacity().unwrap_or(0);
         info.total_sectors = if reported < 2 { mmc::nominal_sectors(&info.media_type) } else { reported };
         // The disc names itself, so the app can tell which disc is in the drive
-        // without the user typing a code. Not every drive answers: a USB bridge
-        // that never returns the structure leaves it empty, and a preset can
-        // still be picked by hand.
-        info.media_id = self.media_id().unwrap_or_default();
+        // without the user typing a code. A blank disc carries that code just as
+        // a written one does: it is stamped on the disc, so the calibration of
+        // the disc about to be burned can be found before anything is written.
+        // Not every drive answers: a USB bridge that never returns the structure
+        // leaves it empty, and a preset can still be picked by hand.
+        info.media_id = self.media_id(&info.media_type).unwrap_or_default();
         //
         // Both sides of the pair matter: a 16x disc in an 8x drive is written at 8x.
         let raw = imapi_write_speeds(id, (info.total_sectors, info.is_blank));
@@ -588,8 +619,11 @@ mod tests {
         assert_eq!(device_number(&format!(r"\\.\{letter}")), device_number(&d.id));
         for d in drives.iter().filter(|d| d.media_present) {
             assert!(d.total_sectors > 1000, "有盘却只有 {} 个扇区", d.total_sectors);
-            // The disc names itself; a drive that cannot say leaves it empty.
-            assert!(!d.media_id.is_empty(), "{} holds a disc whose MID cannot be read", d.product);
+            // A DVD names itself, blank or written; a CD keeps no maker and media
+            // code in this structure, so it has no code to read.
+            if d.media_type.starts_with("DVD") {
+                assert!(!d.media_id.is_empty(), "{} holds a disc whose MID cannot be read", d.product);
+            }
         }
         if !d.media_present {
             assert_eq!(d.total_sectors, 0, "空仓不该报容量");
