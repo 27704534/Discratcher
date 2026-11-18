@@ -34,6 +34,7 @@
   "cal.checking": "正在识别光盘…",
   "cal.devNote": "开发模拟：空白光盘 → 标定 → 贡献",
   "cal.devRun": "跑一遍",
+  "cal.discMid": "盘厂代码",
   "cal.foreign": "这张校准盘不是 Discratcher 刻的（可能来自 disc-probe），内容无法逐字节核对，只确认了能读",
   "cal.hi": "外圈终点",
   "cal.hintNoDisc": "放入一张空白 DVD 或 CD-R",
