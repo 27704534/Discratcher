@@ -326,25 +326,36 @@ pub mod mmc {
         }
     }
 
-    /// READ DISC STRUCTURE. The allocation length sits in bytes 8 and 9 here, not in
-    /// the bytes 6 and 7 that the other commands use. A drive handed the wrong
-    /// place answers with an empty buffer instead of an error, which is
-    /// indistinguishable from a disc that has nothing to say.
-    pub fn read_disc_structure(format: u8, allocation: u16) -> [u8; 10] {
-        [0xAD, 0, format, 0, 0, 0, 0, 0, (allocation >> 8) as u8, allocation as u8]
+    /// READ DISC STRUCTURE. The command is twelve bytes long: the format code sits
+    /// in byte 7 and the allocation length in bytes 8 and 9. A drive handed the
+    /// length in the wrong place answers with an empty buffer instead of an error,
+    /// which is indistinguishable from a disc that has nothing to say.
+    pub fn read_disc_structure(format: u8, allocation: u16) -> [u8; 12] {
+        [0xAD, 0, 0, 0, 0, 0, 0, format, (allocation >> 8) as u8, allocation as u8, 0, 0]
     }
 
     /// One record of the disc structure: an index, six characters of text and a
     /// terminator.
     const RECORD_BYTES: usize = 8;
 
+    /// Where a DVD+R keeps its own code and how long that code is. The maker
+    /// takes eight bytes and the media code three, and the pair sits at byte 23
+    /// of the structure the drive reports: the same place ImgBurn reads it, and
+    /// the place the ADIP answer puts it as well.
+    const DISC_CODE_AT: usize = 23;
+    const DISC_CODE_BYTES: usize = 11;
+    /// The maker's part of that code.
+    const MAKER_BYTES: usize = 8;
+
     /// The disc's own identification code, out of a READ DISC STRUCTURE answer.
     ///
-    /// The structure is a table of fixed eight byte records. Two of them hold
-    /// text, the maker and the media code, and together they spell the MID the
-    /// DVD Forum has printed on recordable discs since 2000: a DVD-R from
-    /// Mitsubishi reads "MCC 03" and "RG20" there and makes "MCC 03RG20", the
-    /// string the calibration library files that disc under.
+    /// A DVD-R keeps its code in a table of fixed eight byte records. Two of
+    /// them hold text, the maker and the media code, and together they spell the
+    /// MID the DVD Forum has printed on recordable discs since 2000: a DVD-R
+    /// from Mitsubishi reads "MCC 03" and "RG20" there and makes "MCC 03RG20",
+    /// the string the calibration library files that disc under.
+    ///
+    /// A DVD+R keeps its code in ADIP instead, and `parse_adip_id` reads that.
     ///
     /// A drive that answers with something else has nothing to say, and the disc
     /// is then named by hand.
@@ -359,6 +370,30 @@ pub mod mmc {
                 let mid = format!("{}{}", text(3)?, text(4)?).trim_end().to_string();
                 (!mid.is_empty()).then_some(mid)
             })
+    }
+
+    /// The code of a DVD+R, out of the ADIP the drive reports.
+    ///
+    /// A DVD+R does not keep its code in a table of records: it keeps it in
+    /// ADIP, the address information written into the groove. The drive copies
+    /// that into the structure it reports as eleven bytes at byte 23, the maker
+    /// in eight and the media code in three, which is where ImgBurn reads it
+    /// too.
+    ///
+    /// The maker is padded out with zeros, and DVDInfo prints that padding as
+    /// one space, so the maker "RITEK" and the code "F16" read as "RITEK F16".
+    pub fn parse_adip_id(b: &[u8]) -> Option<String> {
+        let field = b.get(DISC_CODE_AT..DISC_CODE_AT + DISC_CODE_BYTES)?;
+        let (maker, code) = field.split_at(MAKER_BYTES);
+        let maker = text_field(maker)?.trim_end().to_string();
+        let code = text_field(code)?.trim_end().to_string();
+        if maker.is_empty() || code.is_empty() {
+            return None;
+        }
+        // A maker that fills its eight bytes stands next to the code; a padded
+        // one is separated from it, the way DVDInfo prints it.
+        let space = if maker.len() < MAKER_BYTES { " " } else { "" };
+        Some(format!("{maker}{space}{code}"))
     }
 
     /// Is a record table here, with its first record numbered `first`? The records
@@ -460,10 +495,45 @@ pub mod mmc {
             assert_eq!(parse_medium_id(&b).as_deref(), Some("MCC 03RG20"));
         }
 
+        /// A DVD+R keeps its code in ADIP, a fixed layout instead of a table of
+        /// numbered records, so there is no table to find in its structure.
         #[test]
-        fn a_dvd_plus_disc_reads_the_same_way() {
-            let b = disc_structure(&[b"\x40\xc1\xfd\x9e\xd8\x52", b"\x85\x0d\x0e\x88\x9a\x80", b"OPTODI", b"SCR016", b"\x88\x80"]);
-            assert_eq!(parse_medium_id(&b).as_deref(), Some("OPTODISCR016"));
+        fn a_dvd_plus_disc_has_no_table_to_read() {
+            let b = disc_structure(&[b"OPTODI", b"SCR016"]);
+            assert_eq!(parse_medium_id(&b), None);
+        }
+
+        /// The structure a blank RITEK DVD+R answered with, byte for byte. It was
+        /// read on an ASUS DRW-24D1ST, which knows no ADIP format of its own
+        /// and copies the code into the structure it reports instead.
+        const DVD_PLUS_STRUCTURE: &[u8] = &[
+            0x08, 0x02, 0x00, 0x00, 0xA1, 0x0F, 0x02, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x26, 0x05, 0x3F,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x52, 0x49, 0x54, 0x45, 0x4B, 0x00, 0x00, 0x00, 0x46,
+            0x31, 0x36, 0x01, 0x38, 0x23, 0x54, 0x37, 0x12, 0x02, 0x50, 0x6E, 0x02, 0x8C, 0x68, 0x16, 0x16,
+            0x0B, 0x0B, 0x0A, 0x0A, 0x01, 0x1D, 0x1E, 0x0C, 0x0C, 0x12, 0x12, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x38, 0x38, 0x02, 0x2D, 0x62, 0x1E, 0x08, 0x2E, 0x23, 0x10,
+            0x04, 0x1E, 0x1D, 0x01, 0x00, 0x00, 0x02, 0x2D, 0x62, 0x1E, 0x08, 0x2E, 0x23, 0x10, 0x04, 0x1E,
+            0x1D, 0x01, 0x00, 0x00, 0x02, 0x00, 0x54, 0x70, 0x02, 0x38, 0x64, 0x24, 0x30, 0x18, 0x10, 0x10,
+            0x01, 0x20, 0x00, 0x00, 0x00, 0x00, 0x02, 0x48, 0x60, 0x2A, 0x30, 0x18, 0x10, 0x10, 0x01, 0x20,
+            0x00, 0x00, 0x00, 0x28, 0x03, 0x00, 0x54, 0xE0, 0x02, 0x41, 0x64, 0x24, 0x30, 0x18, 0x10, 0x10,
+            0x01, 0x28, 0x00, 0x00, 0x00, 0x00, 0x02, 0xAF, 0x5B, 0x3E, 0x30, 0x18, 0x10, 0x10, 0x01, 0x28,
+            0x00, 0x00, 0x00, 0x5A,
+        ];
+
+        #[test]
+        fn a_dvd_plus_disc_names_itself_in_adip() {
+            assert_eq!(parse_adip_id(DVD_PLUS_STRUCTURE).as_deref(), Some("RITEK F16"));
+            // The same structure holds no table of records, so the DVD-R reader
+            // finds nothing in it.
+            assert_eq!(parse_medium_id(DVD_PLUS_STRUCTURE), None);
+        }
+
+        #[test]
+        fn a_structure_without_the_adip_code_has_no_mid() {
+            assert_eq!(parse_adip_id(&[]), None);
+            assert_eq!(parse_adip_id(&[0u8; 64]), None);
+            // A DVD-R structure: the code is in the record table, not at byte 23.
+            assert_eq!(parse_adip_id(&disc_structure(&[b"MCC 03", b"RG20  "])), None);
         }
 
         #[test]
@@ -477,11 +547,13 @@ pub mod mmc {
 
         #[test]
         fn the_structure_command_puts_its_length_where_the_drive_looks() {
-            // Bytes 8 and 9, not bytes 6 and 7: the wrong place comes back empty.
-            let c = read_disc_structure(0x00, 0x1000);
+            // Twelve bytes, the format in byte 7 and the length in bytes 8 and 9:
+            // the wrong place comes back empty.
+            let c = read_disc_structure(0x11, 0x1000);
+            assert_eq!(c.len(), 12);
             assert_eq!(c[0], 0xAD);
+            assert_eq!(c[7], 0x11);
             assert_eq!(&c[8..10], &[0x10, 0x00]);
-            assert_eq!(&c[6..8], &[0, 0]);
         }
 
         #[test]
