@@ -34,6 +34,7 @@
   "cal.checking": "Identifying the disc…",
   "cal.devNote": "Dev simulation: blank disc → calibrate → share",
   "cal.devRun": "Run it",
+  "cal.discMid": "Disc MID",
   "cal.foreign": "This calibration disc was not burned by Discratcher (perhaps disc-probe), so only its readability was checked, not its bytes",
   "cal.hi": "Outer end",
   "cal.hintNoDisc": "Insert a blank DVD or CD-R",

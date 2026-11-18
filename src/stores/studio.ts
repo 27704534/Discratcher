@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, shallowRef, watch } from 'vue'
 import { call, CANCELLED } from '../api'
+import { normalizeCode } from '../catalog'
 import { isCd } from '../etaModel'
 import { notifyError } from '../notices'
 import { useComposition } from './composition'
@@ -56,8 +57,13 @@ export const useStudio = defineStore('studio', () => {
   watch(
     () => drive.value?.mediaId,
     (id) => {
-      const hits = presets.value.filter((p) => p.mediaId === id)
-      if (id && hits.length === 1) presetId.value = hits[0].id
+      if (!id) return
+      // The disc names itself and the presets are named the way the discs print
+      // them, so the two are compared without their spacing: "RITEK F16" and
+      // "RITEKF16" are the same disc.
+      const key = normalizeCode(id)
+      const hits = presets.value.filter((p) => normalizeCode(p.mediaId) === key)
+      if (hits.length === 1) presetId.value = hits[0].id
     },
   )
 

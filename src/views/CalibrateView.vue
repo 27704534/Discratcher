@@ -3,6 +3,10 @@
     <div class="flow">
       <h1>{{ s.pendingCode ? t('cal.titleFor', { code: s.pendingCode }) : t('cal.title') }}</h1>
       <DrivePicker bare />
+      <div v-if="discMid" class="row small">
+        <span class="grow muted">{{ t('cal.discMid') }}</span>
+        <span class="mono selectable">{{ discMid }}</span>
+      </div>
       <div class="step">
         <span class="grow">{{ line }}</span>
         <UiButton variant="solid" :disabled="!ready || !!s.job" @click="begin">{{ t('cal.start') }}</UiButton>
@@ -74,6 +78,9 @@ let referenceLba = 0
 let points: CalibrationRungRecord[] = []
 let rungClock = 0
 
+/** The disc in the drive names itself, and calibrating uses up a blank disc of
+ *  this model: the code says which one that is before anything is burned. */
+const discMid = computed(() => s.drive?.mediaId ?? '')
 /** What the disc is, found out before the button is pressed. `unknown` when the read failed: pressing the button says why. */
 const kind = ref<DiscKind | 'checking' | 'unknown'>('none')
 watch(
